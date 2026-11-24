@@ -5,7 +5,9 @@
 //
 // You don't need to edit this file: all settings live in wealthdesk_config.json.
 
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -14,7 +16,9 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:printing/printing.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:workmanager/workmanager.dart';
@@ -121,7 +125,7 @@ Future<void> main() async {
       existingWorkPolicy: ExistingWorkPolicy.keep,
     );
   } catch (_) {}
-  if (AppConfig.showBanner || AppConfig.interstitialEvery > 0) {
+  if (AppConfig.showBanner || AppConfig.interstitialId.isNotEmpty || AppConfig.rewardedId.isNotEmpty || AppConfig.appOpenId.isNotEmpty) {
     try {
       await MobileAds.instance.initialize();
     } catch (_) {}
@@ -159,6 +163,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   AdSize? _bannerSize;
   bool _bannerLoaded = false;
   bool _pro = false;
+  // full-screen ads
+  InterstitialAd? _inter;
+  RewardedAd? _rewarded;
+  bool _rewardLoading = false;
+  AppOpenAd? _appOpen;
+  int _appOpenLoadedAt = 0;
+  bool _wantAppOpen = true; // show one on cold start if it loads in time
+  int _lastFullScreen = 0;
+  int _lastAppOpen = 0;
+  int _adFreeUntil = 0;
+  int _pausedAt = 0;
+  int _quietUntil = 0; // e.g. right after opening UPI / WhatsApp
+  bool _firstLoadDone = false;
   bool _failed = false;
   double _progress = 0;
   late final Uri _home = Uri.parse(baseUrl(null));
@@ -170,8 +187,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     SharedPreferences.getInstance().then((p) {
       if (!mounted) return;
-      setState(() => _pro = p.getBool('wd_pro') ?? false);
+      setState(() {
+        _pro = p.getBool('wd_pro') ?? false;
+        _adFreeUntil = p.getInt('wd_adfree_until') ?? 0;
+        _lastAppOpen = p.getInt('wd_last_appopen') ?? 0;
+      });
+      _loadInter();
+      _loadRewarded();
+      _loadAppOpen();
       _maybeInterstitial(p);
+      Future.delayed(const Duration(seconds: 6), () => _wantAppOpen = false);
     });
   }
 
@@ -182,14 +207,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _pausedAt = _now();
+    } else if (state == AppLifecycleState.resumed) {
+      final away = _pausedAt == 0 ? 0 : _now() - _pausedAt;
+      // only after a real break (2+ min away), never right after paying / sharing
+      if (away > 2 * 60 * 1000 && _now() > _quietUntil) _showAppOpen();
+    }
+  }
+
+  @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _banner?.dispose();
+    _inter?.dispose();
+    _rewarded?.dispose();
+    _appOpen?.dispose();
     if (instance == this) instance = null;
     super.dispose();
   }
 
-  bool get _adsAllowed => !_pro || AppConfig.adsForPro;
+  int _now() => DateTime.now().millisecondsSinceEpoch;
+  bool get _adFree => _adFreeUntil > _now();
+  bool get _adsAllowed => (!_pro || AppConfig.adsForPro) && !_adFree;
+  void _markFullScreen() => _lastFullScreen = _now();
 
   // ---------------- ads
   Future<void> _loadBanner() async {
@@ -214,31 +256,186 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     )..load();
   }
 
-  Future<void> _maybeInterstitial(SharedPreferences p) async {
-    final every = AppConfig.interstitialEvery;
-    if (every <= 0 || AppConfig.interstitialId.isEmpty || !_adsAllowed) return;
-    final opens = (p.getInt('wd_opens') ?? 0) + 1;
-    await p.setInt('wd_opens', opens);
-    if (opens % every != 0) return;
-    await Future.delayed(const Duration(seconds: 4));
+  // ---------------- full-screen: interstitial (every N opens / natural breaks)
+  void _loadInter() {
+    if (AppConfig.interstitialId.isEmpty || _inter != null) return;
     InterstitialAd.load(
       adUnitId: AppConfig.interstitialId,
       request: const AdRequest(),
       adLoadCallback: InterstitialAdLoadCallback(
-        onAdLoaded: (ad) {
-          ad.fullScreenContentCallback = FullScreenContentCallback(
-            onAdDismissedFullScreenContent: (ad) => ad.dispose(),
-            onAdFailedToShowFullScreenContent: (ad, error) => ad.dispose(),
-          );
-          ad.show();
-        },
-        onAdFailedToLoad: (error) {},
+        onAdLoaded: (ad) => _inter = ad,
+        onAdFailedToLoad: (error) => _inter = null,
       ),
     );
   }
 
+  bool _showInter({int gapMinutes = 10}) {
+    final ad = _inter;
+    if (ad == null || !_adsAllowed || _now() - _lastFullScreen < gapMinutes * 60 * 1000) return false;
+    _inter = null;
+    ad.fullScreenContentCallback = FullScreenContentCallback(
+      onAdDismissedFullScreenContent: (a) {
+        a.dispose();
+        _loadInter();
+      },
+      onAdFailedToShowFullScreenContent: (a, e) {
+        a.dispose();
+        _loadInter();
+      },
+    );
+    _markFullScreen();
+    ad.show();
+    return true;
+  }
+
+  Future<void> _maybeInterstitial(SharedPreferences p) async {
+    final every = AppConfig.interstitialEvery;
+    if (every <= 0 || AppConfig.interstitialId.isEmpty) return;
+    final opens = (p.getInt('wd_opens') ?? 0) + 1;
+    await p.setInt('wd_opens', opens);
+    if (opens % every != 0) return;
+    for (var i = 0; i < 16 && _inter == null; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+    await Future.delayed(const Duration(seconds: 2));
+    _showInter(gapMinutes: 1);
+  }
+
+  // ---------------- app-open ad (cold start + coming back after a break)
+  void _loadAppOpen() {
+    if (AppConfig.appOpenId.isEmpty || _appOpen != null) return;
+    AppOpenAd.load(
+      adUnitId: AppConfig.appOpenId,
+      request: const AdRequest(),
+      adLoadCallback: AppOpenAdLoadCallback(
+        onAdLoaded: (ad) {
+          _appOpen = ad;
+          _appOpenLoadedAt = _now();
+          if (_wantAppOpen && _firstLoadDone) {
+            _wantAppOpen = false;
+            _showAppOpen();
+          }
+        },
+        onAdFailedToLoad: (error) => _appOpen = null,
+      ),
+    );
+  }
+
+  void _showAppOpen() {
+    final ad = _appOpen;
+    if (ad == null) {
+      _loadAppOpen();
+      return;
+    }
+    if (!_adsAllowed || _now() - _lastAppOpen < AppConfig.appOpenHours * 3600 * 1000 || _now() - _lastFullScreen < 60 * 1000) return;
+    if (_now() - _appOpenLoadedAt > 4 * 3600 * 1000) {
+      ad.dispose();
+      _appOpen = null;
+      _loadAppOpen();
+      return;
+    }
+    _appOpen = null;
+    ad.fullScreenContentCallback = FullScreenContentCallback(
+      onAdDismissedFullScreenContent: (a) {
+        a.dispose();
+        _loadAppOpen();
+      },
+      onAdFailedToShowFullScreenContent: (a, e) {
+        a.dispose();
+        _loadAppOpen();
+      },
+    );
+    _lastAppOpen = _now();
+    SharedPreferences.getInstance().then((p) => p.setInt('wd_last_appopen', _lastAppOpen));
+    _markFullScreen();
+    ad.show();
+  }
+
+  // ---------------- rewarded ad (free scans, PDF report, ad-free day)
+  void _loadRewarded() {
+    if (AppConfig.rewardedId.isEmpty || _rewarded != null || _rewardLoading) return;
+    _rewardLoading = true;
+    RewardedAd.load(
+      adUnitId: AppConfig.rewardedId,
+      request: const AdRequest(),
+      rewardedAdLoadCallback: RewardedAdLoadCallback(
+        onAdLoaded: (ad) {
+          _rewarded = ad;
+          _rewardLoading = false;
+        },
+        onAdFailedToLoad: (error) {
+          _rewarded = null;
+          _rewardLoading = false;
+        },
+      ),
+    );
+  }
+
+  /// Shows a rewarded ad. Returns true only if the person watched it to the end.
+  Future<bool> _showRewarded() async {
+    if (AppConfig.rewardedId.isEmpty) return false;
+    if (_rewarded == null) {
+      _loadRewarded();
+      for (var i = 0; i < 24 && _rewarded == null; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        if (_rewarded == null && !_rewardLoading) _loadRewarded();
+      }
+    }
+    final ad = _rewarded;
+    if (ad == null) {
+      _toast('No ad is available right now — please try again in a minute.');
+      return false;
+    }
+    _rewarded = null;
+    final done = Completer<bool>();
+    var earned = false;
+    ad.fullScreenContentCallback = FullScreenContentCallback(
+      onAdDismissedFullScreenContent: (a) {
+        a.dispose();
+        if (!done.isCompleted) done.complete(earned);
+        _loadRewarded();
+      },
+      onAdFailedToShowFullScreenContent: (a, e) {
+        a.dispose();
+        if (!done.isCompleted) done.complete(false);
+        _loadRewarded();
+      },
+    );
+    _markFullScreen();
+    _quietUntil = _now() + 60 * 1000;
+    await ad.show(onUserEarnedReward: (a, reward) => earned = true);
+    return done.future;
+  }
+
+  Future<void> _offerAdFree() async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Remove ads for 24 hours?'),
+        content: const Text("Watch one short video and you won't see any ads for a whole day."),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Not now')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.black),
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Watch ad'),
+          ),
+        ],
+      ),
+    );
+    if (yes != true) return;
+    if (await _showRewarded()) {
+      _adFreeUntil = _now() + 24 * 3600 * 1000;
+      final p = await SharedPreferences.getInstance();
+      await p.setInt('wd_adfree_until', _adFreeUntil);
+      if (mounted) setState(() {});
+      _toast('🎉 No ads for the next 24 hours');
+    }
+  }
+
   // ---------------- links that belong to other apps
   Future<void> _openOutside(Uri uri) async {
+    _quietUntil = _now() + 10 * 60 * 1000;
     var u = uri;
     if (u.scheme == 'intent') {
       // intent://pay?pa=...#Intent;scheme=upi;package=...;end  ->  upi://pay?pa=...
@@ -308,6 +505,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _toast('Could not create the PDF on this phone');
         }
         return true;
+      case 'share':
+        // Excel / CSV / backup / Money Wrapped image -> Android share sheet
+        // (Save to Files, Drive, WhatsApp, Gmail…)
+        try {
+          final name = (m['name'] ?? 'wealth-desk-file').toString().replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+          final bytes = base64Decode((m['b64'] ?? '').toString());
+          final dir = await getTemporaryDirectory();
+          final f = File('${dir.path}/$name');
+          await f.writeAsBytes(bytes, flush: true);
+          _quietUntil = _now() + 10 * 60 * 1000;
+          final text = (m['text'] ?? '').toString();
+          await Share.shareXFiles([XFile(f.path, mimeType: (m['mime'] ?? '').toString().isEmpty ? null : m['mime'].toString(), name: name)], text: text.isEmpty ? null : text);
+          return true;
+        } catch (_) {
+          _toast('Could not save the file on this phone');
+          return false;
+        }
+      case 'caps':
+        return {'rewarded': AppConfig.rewardedId.isNotEmpty, 'adFree': _adFree};
+      case 'reward':
+        return await _showRewarded();
+      case 'pause':
+        return AppConfig.breakAds ? _showInter() : false;
       case 'open':
         final url = (m['url'] ?? '').toString();
         if (url.isNotEmpty) await _openOutside(Uri.parse(url));
@@ -380,6 +600,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         useHybridComposition: true,
                         thirdPartyCookiesEnabled: true,
                         transparentBackground: true,
+                        textZoom: 100,
                       ),
                       onWebViewCreated: (c) {
                         _web = c;
@@ -398,6 +619,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         final uri = action.request.url;
                         if (uri != null) _openOutside(uri);
                         return false;
+                      },
+                      onLoadStop: (c, url) {
+                        if (_firstLoadDone) return;
+                        _firstLoadDone = true;
+                        if (_wantAppOpen && _appOpen != null) {
+                          _wantAppOpen = false;
+                          Future.delayed(const Duration(milliseconds: 1200), _showAppOpen);
+                        }
                       },
                       onProgressChanged: (c, p) {
                         if (mounted) setState(() => _progress = p / 100);
@@ -445,6 +674,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ],
                 ),
               ),
+              if (showBanner && AppConfig.removeAdsReward && AppConfig.rewardedId.isNotEmpty)
+                Container(
+                  width: double.infinity,
+                  color: const Color(AppConfig.backgroundColor),
+                  padding: const EdgeInsets.fromLTRB(12, 2, 6, 0),
+                  child: Row(
+                    children: [
+                      const Text('Ad', style: TextStyle(fontSize: 11, color: Colors.black45, fontWeight: FontWeight.w600)),
+                      const Spacer(),
+                      TextButton(
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          minimumSize: const Size(0, 26),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        onPressed: _offerAdFree,
+                        child: const Text('Remove ads for 24h ›', style: TextStyle(fontSize: 12, color: Colors.black87, fontWeight: FontWeight.w600)),
+                      ),
+                    ],
+                  ),
+                ),
               if (showBanner)
                 SizedBox(
                   width: _bannerSize!.width.toDouble(),
