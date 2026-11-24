@@ -25,9 +25,12 @@ if not re.match(r'^\d+\.\d+\.\d+$', ver): fail('"version" must look like 1.0.0')
 app_id = str(cfg.get('admob_app_id', '')).strip()
 if not re.match(r'^ca-app-pub-\d+~\d+$', app_id):
     fail('"admob_app_id" must look like ca-app-pub-1234567890123456~1234567890 (AdMob → Apps → App settings). It contains a ~ sign.')
+TEST = 'ca-app-pub-3940256099942544/'
 banner = str(cfg.get('admob_banner_id', '')).strip()
 inter = str(cfg.get('admob_interstitial_id', '')).strip()
-for k, v in (('admob_banner_id', banner), ('admob_interstitial_id', inter)):
+app_open = str(cfg.get('admob_app_open_id', TEST + '9257395921' if '3940256099942544' in app_id else '')).strip()
+rewarded = str(cfg.get('admob_rewarded_id', TEST + '5224354917' if '3940256099942544' in app_id else '')).strip()
+for k, v in (('admob_banner_id', banner), ('admob_interstitial_id', inter), ('admob_app_open_id', app_open), ('admob_rewarded_id', rewarded)):
     if v and not re.match(r'^ca-app-pub-\d+/\d+$', v):
         fail('"%s" must look like ca-app-pub-1234567890123456/1234567890 (it contains a / sign), or be empty "".' % k)
 def color(k, d):
@@ -36,6 +39,9 @@ def color(k, d):
     return c.upper()
 bg, brand = color('background_color', '#F1F0E8'), color('brand_color', '#FAE80A')
 every = int(cfg.get('full_screen_ad_every_n_opens', 0) or 0)
+app_open_hours = max(1, int(cfg.get('app_open_ad_every_hours', 4) or 4))
+break_ads = bool(cfg.get('full_screen_ad_at_breaks', True))
+remove_ads_reward = bool(cfg.get('remove_ads_reward', True))
 show_banner = bool(cfg.get('show_banner_ad', True))
 ads_pro = bool(cfg.get('ads_for_pro_users', False))
 test_ids = '3940256099942544' in app_id
@@ -50,6 +56,11 @@ class AppConfig {{
   static const bool showBanner = {str(show_banner and bool(banner)).lower()};
   static const int interstitialEvery = {max(0, every) if inter else 0};
   static const bool adsForPro = {str(ads_pro).lower()};
+  static const String appOpenId = '{esc(app_open)}';
+  static const int appOpenHours = {app_open_hours};
+  static const String rewardedId = '{esc(rewarded)}';
+  static const bool breakAds = {str(break_ads and bool(inter)).lower()};
+  static const bool removeAdsReward = {str(remove_ads_reward).lower()};
   static const int backgroundColor = 0xFF{bg};
   static const int brandColor = 0xFF{brand};
 }}
