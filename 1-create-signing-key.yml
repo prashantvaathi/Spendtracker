@@ -1,0 +1,47 @@
+name: "1 · Create signing key (run once)"
+
+# Makes the private key that signs your app for Google Play.
+# Run it ONE time, download the result, save it safely, and add the two secrets.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  key:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Make the key
+        run: |
+          mkdir key && cd key
+          PASS=$(openssl rand -hex 16)
+          keytool -genkeypair -keystore upload-keystore.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "$PASS" -keypass "$PASS" -dname "CN=Wealth Desk, O=Plutomonk, L=Kolkata, ST=West Bengal, C=IN"
+          base64 -w0 upload-keystore.jks > KEYSTORE_BASE64.txt
+          printf "%s" "$PASS" > KEYSTORE_PASSWORD.txt
+          cat > READ-ME-FIRST.txt <<'EOT'
+          YOUR APP SIGNING KEY — KEEP THIS SAFE (Google Drive + a pen drive). Never share it.
+          Without it you can never update your app on Google Play.
+
+          Now add 2 secrets in GitHub:
+          Your repository → Settings → Secrets and variables → Actions → New repository secret
+
+            Name: KEYSTORE_BASE64     Value: everything inside KEYSTORE_BASE64.txt
+            Name: KEYSTORE_PASSWORD   Value: everything inside KEYSTORE_PASSWORD.txt
+
+          Then run "2 · Build Android app" again. It will now also make the Play Store file (.aab).
+          EOT
+          echo "### ✅ Key created" >> $GITHUB_STEP_SUMMARY
+          echo "Download **SIGNING-KEY-keep-safe** below, save it, then add the 2 secrets (see READ-ME-FIRST.txt inside)." >> $GITHUB_STEP_SUMMARY
+
+      - name: Save the key for you to download
+        uses: actions/upload-artifact@v4
+        with:
+          name: SIGNING-KEY-keep-safe
+          path: key/
+          retention-days: 7

@@ -1,0 +1,96 @@
+name: "2 · Build Android app"
+
+# Runs automatically whenever you change a file (e.g. wealthdesk_config.json),
+# or press "Run workflow". Download the result from the "Artifacts" section.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths-ignore: ["**.md", "COPY-OF-github-workflows/**"]
+
+concurrency:
+  group: build-app
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Get the project
+        uses: actions/checkout@v4
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.27.4"
+          channel: stable
+          cache: true
+
+      - name: Create the Android project files
+        run: |
+          rm -rf android
+          flutter create --org com.plutomonk --project-name wealth_desk --platforms android --no-pub /tmp/gen
+          cp -r /tmp/gen/android ./android
+
+      - name: Apply your settings (wealthdesk_config.json)
+        run: python3 tool/configure.py
+
+      - name: Download packages
+        run: flutter pub get
+
+      - name: App icon and splash screen
+        run: |
+          dart run flutter_launcher_icons
+          dart run flutter_native_splash:create
+
+      - name: Signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | tr -d ' \n\r' | base64 -d > android/app/upload-keystore.jks
+            printf "storePassword=%s\nkeyPassword=%s\nkeyAlias=upload\nstoreFile=upload-keystore.jks\n" "$KEYSTORE_PASSWORD" "$KEYSTORE_PASSWORD" > android/key.properties
+            echo "SIGNED=yes" >> $GITHUB_ENV
+          else
+            echo "::warning::No signing key yet, so only a TEST app (.apk) is built. Run '1 · Create signing key' and add the 2 secrets to also get the Play Store file (.aab)."
+            echo "SIGNED=no" >> $GITHUB_ENV
+          fi
+
+      - name: Build the Play Store file (.aab)
+        if: env.SIGNED == 'yes'
+        run: flutter build appbundle --release --build-number=${{ github.run_number }}
+
+      - name: Build the install-on-phone file (.apk)
+        run: flutter build apk --release --build-number=${{ github.run_number }}
+
+      - name: Collect the files
+        run: |
+          mkdir -p out
+          cp build/app/outputs/flutter-apk/app-release.apk out/WealthDesk-install-on-phone.apk
+          if [ -f build/app/outputs/bundle/release/app-release.aab ]; then
+            cp build/app/outputs/bundle/release/app-release.aab out/WealthDesk-upload-to-PlayStore.aab
+          fi
+          {
+            echo "### ✅ Your app is ready (build ${{ github.run_number }})"
+            echo ""
+            echo "Scroll down to **Artifacts** and download **WealthDesk-Android-${{ github.run_number }}**."
+            echo ""
+            echo "- **WealthDesk-install-on-phone.apk** — open it on an Android phone to test"
+            if [ "$SIGNED" = "yes" ]; then echo "- **WealthDesk-upload-to-PlayStore.aab** — upload this in Google Play Console"; else echo "- No Play Store file yet: run **1 · Create signing key** first."; fi
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Save the app files for you to download
+        uses: actions/upload-artifact@v4
+        with:
+          name: WealthDesk-Android-${{ github.run_number }}
+          path: out/
+          retention-days: 30

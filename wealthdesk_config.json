@@ -1,0 +1,16 @@
+{
+  "website_url": "https://YOUR-SUBDOMAIN.plutomonk.com/",
+  "app_name": "Wealth Desk",
+  "package_id": "com.plutomonk.wealthdesk",
+  "version": "1.0.0",
+
+  "admob_app_id": "ca-app-pub-3940256099942544~3347511713",
+  "admob_banner_id": "ca-app-pub-3940256099942544/9214589741",
+  "admob_interstitial_id": "ca-app-pub-3940256099942544/1033173712",
+  "show_banner_ad": true,
+  "full_screen_ad_every_n_opens": 0,
+  "ads_for_pro_users": false,
+
+  "background_color": "#F1F0E8",
+  "brand_color": "#FAE80A"
+}
