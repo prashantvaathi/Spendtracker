@@ -1,0 +1,106 @@
+name: "Wealth Desk app"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "What do you want to do?"
+        type: choice
+        options:
+          - "Build the app"
+          - "Create signing key (only once)"
+        default: "Build the app"
+  push:
+    branches: [main, master]
+    paths: ["wealthdesk_config.json"]
+
+jobs:
+  key:
+    if: github.event_name == 'workflow_dispatch' && inputs.task == 'Create signing key (only once)'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Make the key
+        run: |
+          mkdir key && cd key
+          PASS=$(openssl rand -hex 16)
+          keytool -genkeypair -keystore upload-keystore.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000 -storepass "$PASS" -keypass "$PASS" -dname "CN=Wealth Desk, O=Plutomonk, L=Kolkata, ST=West Bengal, C=IN"
+          base64 -w0 upload-keystore.jks > KEYSTORE_BASE64.txt
+          printf "%s" "$PASS" > KEYSTORE_PASSWORD.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SIGNING-KEY-keep-safe
+          path: key/
+          retention-days: 7
+
+  build:
+    if: github.event_name == 'push' || inputs.task == 'Build the app'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Put the files into their folders
+        run: |
+          if [ -f project.zip ]; then unzip -o project.zip -d .; fi
+          mkdir -p lib tool/templates assets
+          [ -f main.dart ] && mv -f main.dart lib/ || true
+          [ -f config.dart ] && mv -f config.dart lib/ || true
+          [ -f configure.py ] && mv -f configure.py tool/ || true
+          [ -f AndroidManifest.xml ] && mv -f AndroidManifest.xml tool/templates/ || true
+          [ -f build.gradle ] && mv -f build.gradle tool/templates/ || true
+          for f in icon.png icon_foreground.png splash.png splash_android12.png; do [ -f "$f" ] && mv -f "$f" assets/ || true; done
+          ls -R lib tool assets
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.27.4"
+          channel: stable
+          cache: true
+      - name: Create the Android project files
+        run: |
+          rm -rf android
+          flutter create --org com.plutomonk --project-name wealth_desk --platforms android --no-pub /tmp/gen
+          cp -r /tmp/gen/android ./android
+      - name: Apply your settings (wealthdesk_config.json)
+        run: python3 tool/configure.py
+      - name: Download packages
+        run: flutter pub get
+      - name: App icon and splash screen
+        run: |
+          dart run flutter_launcher_icons
+          dart run flutter_native_splash:create
+      - name: Signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | tr -d ' \n\r' | base64 -d > android/app/upload-keystore.jks
+            printf "storePassword=%s\nkeyPassword=%s\nkeyAlias=upload\nstoreFile=upload-keystore.jks\n" "$KEYSTORE_PASSWORD" "$KEYSTORE_PASSWORD" > android/key.properties
+            echo "SIGNED=yes" >> $GITHUB_ENV
+          else
+            echo "SIGNED=no" >> $GITHUB_ENV
+          fi
+      - name: Build the Play Store file (.aab)
+        if: env.SIGNED == 'yes'
+        run: flutter build appbundle --release --build-number=${{ github.run_number }}
+      - name: Build the install-on-phone file (.apk)
+        run: flutter build apk --release --build-number=${{ github.run_number }}
+      - name: Collect the files
+        run: |
+          mkdir -p out
+          cp build/app/outputs/flutter-apk/app-release.apk out/WealthDesk-install-on-phone.apk
+          if [ -f build/app/outputs/bundle/release/app-release.aab ]; then
+            cp build/app/outputs/bundle/release/app-release.aab out/WealthDesk-upload-to-PlayStore.aab
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WealthDesk-Android-${{ github.run_number }}
+          path: out/
+          retention-days: 30
