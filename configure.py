@@ -42,6 +42,7 @@ every = int(cfg.get('full_screen_ad_every_n_opens', 0) or 0)
 app_open_hours = max(1, int(cfg.get('app_open_ad_every_hours', 4) or 4))
 break_ads = bool(cfg.get('full_screen_ad_at_breaks', True))
 remove_ads_reward = bool(cfg.get('remove_ads_reward', True))
+remove_ads_hours = max(1, min(72, int(cfg.get('remove_ads_hours', 2) or 2)))
 show_banner = bool(cfg.get('show_banner_ad', True))
 ads_pro = bool(cfg.get('ads_for_pro_users', False))
 test_ids = '3940256099942544' in app_id
@@ -61,6 +62,7 @@ class AppConfig {{
   static const String rewardedId = '{esc(rewarded)}';
   static const bool breakAds = {str(break_ads and bool(inter)).lower()};
   static const bool removeAdsReward = {str(remove_ads_reward).lower()};
+  static const int removeAdsHours = {remove_ads_hours};
   static const int backgroundColor = 0xFF{bg};
   static const int brandColor = 0xFF{brand};
 }}

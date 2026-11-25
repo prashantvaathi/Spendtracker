@@ -411,8 +411,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final yes = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
-        title: const Text('Remove ads for 24 hours?'),
-        content: const Text("Watch one short video and you won't see any ads for a whole day."),
+        title: Text('Remove ads for ${AppConfig.removeAdsHours} hour${AppConfig.removeAdsHours == 1 ? '' : 's'}?'),
+        content: Text("Watch one short video and you won't see any ads for the next ${AppConfig.removeAdsHours} hour${AppConfig.removeAdsHours == 1 ? '' : 's'}."),
         actions: [
           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Not now')),
           FilledButton(
@@ -425,11 +425,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
     if (yes != true) return;
     if (await _showRewarded()) {
-      _adFreeUntil = _now() + 24 * 3600 * 1000;
+      _adFreeUntil = _now() + AppConfig.removeAdsHours * 3600 * 1000;
       final p = await SharedPreferences.getInstance();
       await p.setInt('wd_adfree_until', _adFreeUntil);
       if (mounted) setState(() {});
-      _toast('🎉 No ads for the next 24 hours');
+      _toast('🎉 No ads for the next ${AppConfig.removeAdsHours} hour${AppConfig.removeAdsHours == 1 ? '' : 's'}');
     }
   }
 
@@ -690,7 +690,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
                         onPressed: _offerAdFree,
-                        child: const Text('Remove ads for 24h ›', style: TextStyle(fontSize: 12, color: Colors.black87, fontWeight: FontWeight.w600)),
+                        child: Text('Remove ads for ${AppConfig.removeAdsHours}h ›', style: const TextStyle(fontSize: 12, color: Colors.black87, fontWeight: FontWeight.w600)),
                       ),
                     ],
                   ),
